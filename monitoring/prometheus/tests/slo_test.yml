@@ -1,0 +1,43 @@
+# SLO Rule Unit Tests - run with: promtool test rules slo_test.yml
+rule_files:
+  - ../rules/slo-rules.yml
+
+evaluation_interval: 1m
+
+tests:
+  # Test: SLO availability recording rule produces correct values
+  - interval: 1m
+    input_series:
+      - series: 'http_requests_total{service="order-service",code="200"}'
+        values: '0+100x60'
+      - series: 'http_requests_total{service="order-service",code="500"}'
+        values: '0+1x60'
+    promql_expr_test:
+      - expr: slo:availability:ratio_rate5m
+        eval_time: 10m
+        exp_samples:
+          - labels: 'slo:availability:ratio_rate5m{service="order-service"}'
+            value: 0.99
+
+  # Test: High burn rate triggers alert
+  - interval: 1m
+    input_series:
+      - series: 'http_requests_total{service="order-service",code="200"}'
+        values: '0+80x60'
+      - series: 'http_requests_total{service="order-service",code="500"}'
+        values: '0+20x60'
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: SLOAvailabilityBurnRateHigh
+
+  # Test: Normal error rate does NOT trigger alert
+  - interval: 1m
+    input_series:
+      - series: 'http_requests_total{service="payment-service",code="200"}'
+        values: '0+999x60'
+      - series: 'http_requests_total{service="payment-service",code="500"}'
+        values: '0+1x60'
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: SLOAvailabilityBurnRateHigh
+        exp_alerts: []

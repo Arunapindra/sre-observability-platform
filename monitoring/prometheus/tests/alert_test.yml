@@ -1,0 +1,48 @@
+# Alert Rule Unit Tests - run with: promtool test rules alert_test.yml
+rule_files:
+  - ../alerts/critical.yml
+  - ../alerts/warning.yml
+
+evaluation_interval: 1m
+
+tests:
+  # Test: High error rate triggers critical alert
+  - interval: 1m
+    input_series:
+      - series: 'http_requests_total{service="order-service",code="500"}'
+        values: '0+50x30'
+      - series: 'http_requests_total{service="order-service",code="200"}'
+        values: '0+50x30'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: HighErrorRate
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: order-service
+
+  # Test: High latency triggers warning
+  - interval: 1m
+    input_series:
+      - series: 'http_request_duration_seconds_bucket{service="payment-service",le="0.5"}'
+        values: '0+20x30'
+      - series: 'http_request_duration_seconds_bucket{service="payment-service",le="1.0"}'
+        values: '0+80x30'
+      - series: 'http_request_duration_seconds_bucket{service="payment-service",le="+Inf"}'
+        values: '0+100x30'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: HighLatencyP99
+
+  # Test: Pod crash loop triggers critical alert
+  - interval: 1m
+    input_series:
+      - series: 'kube_pod_container_status_restarts_total{namespace="default",pod="order-service-abc123",container="order-service"}'
+        values: '0 1 2 3 5 8 12 17 23 30'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: PodCrashLooping
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: default
