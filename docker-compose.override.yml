@@ -1,0 +1,44 @@
+# Development overrides
+# Usage: docker compose -f docker-compose.yml -f docker-compose.override.yml up
+# This file enables hot-reload, debug logging, and anonymous Grafana access for local dev.
+services:
+  prometheus:
+    volumes:
+      - ./monitoring/prometheus:/etc/prometheus:ro
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.retention.time=1h'
+      - '--web.enable-lifecycle'
+      - '--log.level=debug'
+
+  grafana:
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_LOG_LEVEL=debug
+
+  order-service:
+    build:
+      context: ./microservices/order-service
+    environment:
+      - LOG_LEVEL=debug
+      - OTEL_TRACES_EXPORTER=none
+
+  payment-service:
+    build:
+      context: ./microservices/payment-service
+    environment:
+      - LOG_LEVEL=debug
+      - OTEL_TRACES_EXPORTER=none
+
+  user-service:
+    build:
+      context: ./microservices/user-service
+    environment:
+      - LOG_LEVEL=debug
+      - OTEL_TRACES_EXPORTER=none
+
+  alertmanager:
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--log.level=debug'
