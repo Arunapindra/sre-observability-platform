@@ -1,0 +1,29 @@
+graph TD
+    A[Incoming Alert] --> B{severity?}
+
+    B -->|critical| C[Critical Route<br/>group_wait: 10s<br/>repeat_interval: 1h]
+    B -->|warning| D[Warning Route<br/>group_wait: 30s<br/>repeat_interval: 4h]
+    B -->|info| E[Info Route<br/>group_wait: 1m<br/>repeat_interval: 12h]
+
+    C --> F{alert type?}
+    F -->|SLO burn rate| G[PagerDuty<br/>Immediate page]
+    F -->|pod crash loop| G
+    F -->|error rate > 10%| G
+    F -->|node down| G
+
+    D --> H{alert type?}
+    H -->|high latency| I[Slack #alerts-warning]
+    H -->|disk > 80%| I
+    H -->|memory > 85%| I
+    H -->|pod restarts| I
+
+    E --> J[Email<br/>Platform team DL]
+
+    subgraph "Inhibition Rules"
+        K[Critical active?] -->|yes| L[Suppress matching warnings]
+        M[Node down?] -->|yes| N[Suppress pod alerts on that node]
+    end
+
+    style G fill:#e74c3c,color:#fff
+    style I fill:#f39c12,color:#fff
+    style J fill:#3498db,color:#fff

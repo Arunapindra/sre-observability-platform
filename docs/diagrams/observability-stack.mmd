@@ -1,0 +1,65 @@
+graph TD
+    subgraph Microservices
+        OS[Order Service<br/>:8081]
+        PS[Payment Service<br/>:8082]
+        US[User Service<br/>:8083]
+        LG[Load Generator<br/>:8090]
+    end
+
+    subgraph "Metrics Pipeline"
+        PROM[Prometheus<br/>:9090]
+        NE[Node Exporter<br/>:9100]
+    end
+
+    subgraph "Log Pipeline"
+        PT[Promtail]
+        LOKI[Loki<br/>:3100]
+    end
+
+    subgraph "Alerting"
+        AM[Alertmanager<br/>:9093]
+        PD[PagerDuty]
+        SL[Slack]
+        EM[Email]
+    end
+
+    subgraph "Visualization"
+        GF[Grafana<br/>:3000]
+        D1[SLO Overview]
+        D2[Service Health]
+        D3[Infrastructure]
+    end
+
+    LG -->|traffic| OS
+    LG -->|traffic| PS
+    LG -->|traffic| US
+    OS -->|circuit breaker| PS
+    OS -->|circuit breaker| US
+
+    PROM -->|scrape /metrics| OS
+    PROM -->|scrape /metrics| PS
+    PROM -->|scrape /metrics| US
+    PROM -->|scrape /metrics| LG
+    PROM -->|scrape /metrics| NE
+    PROM -->|evaluate rules| AM
+
+    OS -->|stdout logs| PT
+    PS -->|stdout logs| PT
+    US -->|stdout logs| PT
+    PT -->|push| LOKI
+
+    AM -->|critical| PD
+    AM -->|warning| SL
+    AM -->|info| EM
+
+    PROM -->|datasource| GF
+    LOKI -->|datasource| GF
+    AM -->|datasource| GF
+    GF --- D1
+    GF --- D2
+    GF --- D3
+
+    style PROM fill:#e6522c,color:#fff
+    style GF fill:#f46800,color:#fff
+    style AM fill:#e6522c,color:#fff
+    style LOKI fill:#2c3e50,color:#fff
