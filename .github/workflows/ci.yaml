@@ -1,0 +1,84 @@
+name: CI Pipeline
+
+on:
+  pull_request:
+    branches: [main, develop]
+  push:
+    branches: [develop]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  lint-and-test:
+    name: Lint & Test Go Code
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [order-service, payment-service, user-service, load-generator]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@v4
+        with:
+          working-directory: microservices/${{ matrix.service }}
+
+      - name: Test
+        run: |
+          cd microservices/${{ matrix.service }}
+          go test -v -race -coverprofile=coverage.out ./...
+
+  build:
+    name: Build Docker Images
+    runs-on: ubuntu-latest
+    needs: lint-and-test
+    strategy:
+      matrix:
+        service: [order-service, payment-service, user-service, load-generator]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: |
+          docker build -t sre-platform/${{ matrix.service }}:${{ github.sha }} \
+            microservices/${{ matrix.service }}/
+
+      - name: Scan with Trivy
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: sre-platform/${{ matrix.service }}:${{ github.sha }}
+          severity: CRITICAL,HIGH
+          exit-code: 0
+
+  validate-configs:
+    name: Validate Monitoring Configs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate Prometheus config
+        run: |
+          docker run --rm -v $PWD/monitoring/prometheus:/etc/prometheus \
+            prom/prometheus:v2.51.0 promtool check config /etc/prometheus/prometheus.yml
+
+      - name: Validate alerting rules
+        run: |
+          docker run --rm -v $PWD/monitoring/prometheus:/etc/prometheus \
+            prom/prometheus:v2.51.0 promtool check rules /etc/prometheus/rules/*.yml /etc/prometheus/alerts/*.yml
+
+      - name: Lint YAML
+        uses: ibiqlik/action-yamllint@v3
+        with:
+          file_or_dir: monitoring/ kubernetes/
+          config_data: |
+            extends: relaxed
+            rules:
+              line-length:
+                max: 200

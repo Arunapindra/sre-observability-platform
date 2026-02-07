@@ -1,0 +1,363 @@
+# =============================================================================
+# Warning Alerts - SRE Observability Platform
+# =============================================================================
+# These alerts trigger Slack notifications and create tickets for
+# investigation during business hours. They indicate degradation that
+# may become critical if not addressed.
+# =============================================================================
+
+groups:
+  # ---------------------------------------------------------------------------
+  # Application Warning Alerts
+  # ---------------------------------------------------------------------------
+  - name: warning.application
+    rules:
+      # Error budget burn rate warning (slow burn from SLO rules)
+      - alert: ErrorBudgetBurnRateWarning
+        expr: |
+          slo:error_budget:availability_remaining < 0.20
+          and
+          slo:error_budget:availability_remaining >= 0
+        for: 30m
+        labels:
+          severity: warning
+          team: platform
+          category: slo
+        annotations:
+          summary: "Error budget running low for {{ $labels.service }}"
+          description: |
+            Service {{ $labels.service }} in namespace {{ $labels.namespace }}
+            has consumed more than 80% of its 30-day error budget. Remaining
+            budget: {{ $value | humanizePercentage }}.
+            Consider freezing non-critical deployments.
+          runbook_url: "https://wiki.example.com/runbooks/error-budget-warning"
+
+      # Elevated error rate (below critical threshold but notable)
+      - alert: ElevatedErrorRate
+        expr: |
+          (
+            sum by (service, namespace) (rate(http_requests_total{status_code=~"5.."}[15m]))
+            /
+            sum by (service, namespace) (rate(http_requests_total[15m]))
+          ) > 0.005
+        for: 15m
+        labels:
+          severity: warning
+          team: platform
+          category: availability
+        annotations:
+          summary: "Elevated error rate on {{ $labels.service }}"
+          description: |
+            Service {{ $labels.service }} in namespace {{ $labels.namespace }}
+            has an error rate of {{ $value | humanizePercentage }} over the
+            last 15 minutes (threshold: 0.5%).
+          runbook_url: "https://wiki.example.com/runbooks/elevated-error-rate"
+
+      # Elevated p95 latency
+      - alert: ElevatedLatency
+        expr: |
+          histogram_quantile(0.95,
+            sum by (service, namespace, le) (
+              rate(http_request_duration_seconds_bucket[15m])
+            )
+          ) > 0.5
+        for: 15m
+        labels:
+          severity: warning
+          team: platform
+          category: latency
+        annotations:
+          summary: "Elevated p95 latency on {{ $labels.service }}"
+          description: |
+            Service {{ $labels.service }} in namespace {{ $labels.namespace }}
+            has a p95 latency of {{ $value | humanizeDuration }} (threshold: 500ms).
+
+  # ---------------------------------------------------------------------------
+  # Resource Warning Alerts
+  # ---------------------------------------------------------------------------
+  - name: warning.resources
+    rules:
+      # High memory usage on containers
+      - alert: HighMemoryUsage
+        expr: |
+          (
+            sum by (namespace, pod, container) (
+              container_memory_working_set_bytes{container!="POD", container!=""}
+            )
+            /
+            sum by (namespace, pod, container) (
+              kube_pod_container_resource_limits{resource="memory", container!="POD", container!=""}
+            )
+          ) > 0.80
+        for: 15m
+        labels:
+          severity: warning
+          team: platform
+          category: resources
+        annotations:
+          summary: "High memory usage on {{ $labels.namespace }}/{{ $labels.pod }}"
+          description: |
+            Container {{ $labels.container }} in pod {{ $labels.pod }}
+            (namespace: {{ $labels.namespace }}) is using
+            {{ $value | humanizePercentage }} of its memory limit.
+            Risk of OOM kill if usage continues to increase.
+          runbook_url: "https://wiki.example.com/runbooks/high-memory-usage"
+
+      # High CPU usage on containers
+      - alert: HighCPUUsage
+        expr: |
+          (
+            sum by (namespace, pod, container) (
+              rate(container_cpu_usage_seconds_total{container!="POD", container!=""}[5m])
+            )
+            /
+            sum by (namespace, pod, container) (
+              kube_pod_container_resource_limits{resource="cpu", container!="POD", container!=""}
+            )
+          ) > 0.80
+        for: 15m
+        labels:
+          severity: warning
+          team: platform
+          category: resources
+        annotations:
+          summary: "High CPU usage on {{ $labels.namespace }}/{{ $labels.pod }}"
+          description: |
+            Container {{ $labels.container }} in pod {{ $labels.pod }}
+            (namespace: {{ $labels.namespace }}) is using
+            {{ $value | humanizePercentage }} of its CPU limit.
+            The container may be throttled, impacting performance.
+          runbook_url: "https://wiki.example.com/runbooks/high-cpu-usage"
+
+      # Container OOM killed
+      - alert: ContainerOOMKilled
+        expr: |
+          kube_pod_container_status_last_terminated_reason{reason="OOMKilled"} == 1
+        for: 0m
+        labels:
+          severity: warning
+          team: platform
+          category: resources
+        annotations:
+          summary: "Container OOM killed: {{ $labels.namespace }}/{{ $labels.pod }}"
+          description: |
+            Container {{ $labels.container }} in pod {{ $labels.pod }}
+            (namespace: {{ $labels.namespace }}) was terminated due to
+            Out-Of-Memory (OOM) kill. The container's memory limit may need
+            to be increased, or the application may have a memory leak.
+          runbook_url: "https://wiki.example.com/runbooks/container-oom-killed"
+
+      # High node CPU usage
+      - alert: HighNodeCPU
+        expr: |
+          (
+            1 - avg by (instance, node) (
+              rate(node_cpu_seconds_total{mode="idle"}[5m])
+            )
+          ) > 0.80
+        for: 15m
+        labels:
+          severity: warning
+          team: infrastructure
+          category: node
+        annotations:
+          summary: "High CPU usage on node {{ $labels.node }}"
+          description: |
+            Node {{ $labels.node }} has CPU usage of
+            {{ $value | humanizePercentage }} for the last 15 minutes.
+          runbook_url: "https://wiki.example.com/runbooks/high-node-cpu"
+
+      # High node memory usage
+      - alert: HighNodeMemory
+        expr: |
+          (
+            1 - (
+              node_memory_MemAvailable_bytes
+              /
+              node_memory_MemTotal_bytes
+            )
+          ) > 0.80
+        for: 15m
+        labels:
+          severity: warning
+          team: infrastructure
+          category: node
+        annotations:
+          summary: "High memory usage on node {{ $labels.node }}"
+          description: |
+            Node {{ $labels.node }} has memory usage of
+            {{ $value | humanizePercentage }} for the last 15 minutes.
+          runbook_url: "https://wiki.example.com/runbooks/high-node-memory"
+
+  # ---------------------------------------------------------------------------
+  # Kubernetes Warning Alerts
+  # ---------------------------------------------------------------------------
+  - name: warning.kubernetes
+    rules:
+      # Deployment replicas mismatch
+      - alert: DeploymentReplicasMismatch
+        expr: |
+          kube_deployment_spec_replicas
+          !=
+          kube_deployment_status_ready_replicas
+        for: 15m
+        labels:
+          severity: warning
+          team: platform
+          category: workload
+        annotations:
+          summary: "Deployment {{ $labels.namespace }}/{{ $labels.deployment }} has replica mismatch"
+          description: |
+            Deployment {{ $labels.deployment }} in namespace
+            {{ $labels.namespace }} has {{ $labels.deployment }} desired
+            replicas but only has ready replicas available. This has
+            persisted for more than 15 minutes.
+          runbook_url: "https://wiki.example.com/runbooks/deployment-replicas-mismatch"
+
+      # StatefulSet replicas mismatch
+      - alert: StatefulSetReplicasMismatch
+        expr: |
+          kube_statefulset_status_replicas_ready
+          !=
+          kube_statefulset_status_replicas
+        for: 15m
+        labels:
+          severity: warning
+          team: platform
+          category: workload
+        annotations:
+          summary: "StatefulSet {{ $labels.namespace }}/{{ $labels.statefulset }} replica mismatch"
+          description: |
+            StatefulSet {{ $labels.statefulset }} in namespace
+            {{ $labels.namespace }} does not have all replicas ready.
+
+      # HPA at max replicas
+      - alert: HPAMaxedOut
+        expr: |
+          kube_horizontalpodautoscaler_status_current_replicas
+          ==
+          kube_horizontalpodautoscaler_spec_max_replicas
+        for: 30m
+        labels:
+          severity: warning
+          team: platform
+          category: scaling
+        annotations:
+          summary: "HPA {{ $labels.namespace }}/{{ $labels.horizontalpodautoscaler }} is maxed out"
+          description: |
+            HPA {{ $labels.horizontalpodautoscaler }} in namespace
+            {{ $labels.namespace }} has been at maximum replica count
+            for 30 minutes. The application may need more capacity than
+            the HPA allows.
+
+      # Pod restarts
+      - alert: HighPodRestartRate
+        expr: |
+          increase(kube_pod_container_status_restarts_total[1h]) > 3
+        for: 10m
+        labels:
+          severity: warning
+          team: platform
+          category: workload
+        annotations:
+          summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} has frequent restarts"
+          description: |
+            Container {{ $labels.container }} in pod {{ $labels.pod }}
+            (namespace: {{ $labels.namespace }}) has restarted
+            {{ $value }} times in the last hour.
+
+      # Persistent volume filling up (warning at 80%)
+      - alert: PersistentVolumeFillingUp
+        expr: |
+          (
+            kubelet_volume_stats_used_bytes
+            /
+            kubelet_volume_stats_capacity_bytes
+          ) > 0.80
+          and
+          (
+            kubelet_volume_stats_used_bytes
+            /
+            kubelet_volume_stats_capacity_bytes
+          ) <= 0.90
+        for: 15m
+        labels:
+          severity: warning
+          team: infrastructure
+          category: storage
+        annotations:
+          summary: "PV {{ $labels.persistentvolumeclaim }} is over 80% full"
+          description: |
+            PersistentVolumeClaim {{ $labels.persistentvolumeclaim }} in
+            namespace {{ $labels.namespace }} is {{ $value | humanizePercentage }}
+            full. Plan capacity expansion before it reaches critical (90%).
+
+      # Job failed
+      - alert: KubeJobFailed
+        expr: |
+          kube_job_status_failed > 0
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+          category: workload
+        annotations:
+          summary: "Job {{ $labels.namespace }}/{{ $labels.job_name }} has failed"
+          description: |
+            Kubernetes Job {{ $labels.job_name }} in namespace
+            {{ $labels.namespace }} has failed pods.
+
+  # ---------------------------------------------------------------------------
+  # Monitoring Stack Warning Alerts
+  # ---------------------------------------------------------------------------
+  - name: warning.monitoring
+    rules:
+      # Prometheus scrape failures
+      - alert: PrometheusHighScrapeFailures
+        expr: |
+          (
+            sum by (job) (up == 0)
+            /
+            count by (job) (up)
+          ) > 0.10
+        for: 15m
+        labels:
+          severity: warning
+          team: platform
+          category: monitoring
+        annotations:
+          summary: "More than 10% of {{ $labels.job }} targets are down"
+          description: |
+            More than 10% of scrape targets for job {{ $labels.job }} are
+            failing. This may indicate network issues or target problems.
+
+      # Prometheus rule evaluation failures
+      - alert: PrometheusRuleFailures
+        expr: |
+          increase(prometheus_rule_evaluation_failures_total[5m]) > 0
+        for: 15m
+        labels:
+          severity: warning
+          team: platform
+          category: monitoring
+        annotations:
+          summary: "Prometheus rule evaluation failures"
+          description: |
+            Prometheus is experiencing rule evaluation failures. Some
+            recording rules or alerts may not be functioning correctly.
+
+      # Prometheus TSDB compaction failures
+      - alert: PrometheusTSDBCompactionsFailing
+        expr: |
+          increase(prometheus_tsdb_compactions_failed_total[6h]) > 0
+        for: 1h
+        labels:
+          severity: warning
+          team: platform
+          category: monitoring
+        annotations:
+          summary: "Prometheus TSDB compactions are failing"
+          description: |
+            Prometheus TSDB is experiencing compaction failures. This
+            may lead to increased disk usage and query performance
+            degradation.

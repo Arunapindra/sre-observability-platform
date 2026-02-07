@@ -1,0 +1,24 @@
+# =============================================================================
+# Grafana Dashboard Provisioning - SRE Observability Platform
+# =============================================================================
+# Auto-provisions dashboards from the filesystem on Grafana startup.
+# Dashboards are loaded from the specified paths and organized into folders.
+# =============================================================================
+
+apiVersion: 1
+
+providers:
+  # ---------------------------------------------------------------------------
+  # SRE Dashboards - SLO, service health, and infrastructure monitoring
+  # ---------------------------------------------------------------------------
+  - name: "SRE Observability"
+    orgId: 1
+    folder: "SRE"
+    folderUid: "sre-dashboards"
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

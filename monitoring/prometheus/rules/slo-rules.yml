@@ -1,0 +1,310 @@
+# =============================================================================
+# SLO/SLI Recording Rules - SRE Observability Platform
+# =============================================================================
+# Implements multi-window, multi-burn-rate alerting based on the Google SRE
+# book methodology. These recording rules pre-compute SLI metrics for
+# efficient SLO tracking and error budget calculation.
+#
+# SLO Targets:
+#   - Availability: 99.9% (43.8 minutes/month downtime budget)
+#   - Latency: 99% of requests < 500ms
+# =============================================================================
+
+groups:
+  # ---------------------------------------------------------------------------
+  # Availability SLI Recording Rules
+  # ---------------------------------------------------------------------------
+  - name: slo.availability.recording
+    interval: 30s
+    rules:
+      # Total request rate per service (all status codes)
+      - record: slo:http_requests:rate5m
+        expr: |
+          sum by (service, namespace) (
+            rate(http_requests_total[5m])
+          )
+
+      # Successful request rate per service (non-5xx responses)
+      - record: slo:http_requests:success_rate5m
+        expr: |
+          sum by (service, namespace) (
+            rate(http_requests_total{status_code!~"5.."}[5m])
+          )
+
+      # Error request rate per service (5xx responses only)
+      - record: slo:http_requests:error_rate5m
+        expr: |
+          sum by (service, namespace) (
+            rate(http_requests_total{status_code=~"5.."}[5m])
+          )
+
+      # Availability SLI: ratio of successful requests (1m, 5m, 30m, 1h windows)
+      - record: slo:availability:ratio_rate1m
+        expr: |
+          sum by (service, namespace) (rate(http_requests_total{status_code!~"5.."}[1m]))
+          /
+          sum by (service, namespace) (rate(http_requests_total[1m]))
+
+      - record: slo:availability:ratio_rate5m
+        expr: |
+          sum by (service, namespace) (rate(http_requests_total{status_code!~"5.."}[5m]))
+          /
+          sum by (service, namespace) (rate(http_requests_total[5m]))
+
+      - record: slo:availability:ratio_rate30m
+        expr: |
+          sum by (service, namespace) (rate(http_requests_total{status_code!~"5.."}[30m]))
+          /
+          sum by (service, namespace) (rate(http_requests_total[30m]))
+
+      - record: slo:availability:ratio_rate1h
+        expr: |
+          sum by (service, namespace) (rate(http_requests_total{status_code!~"5.."}[1h]))
+          /
+          sum by (service, namespace) (rate(http_requests_total[1h]))
+
+      - record: slo:availability:ratio_rate6h
+        expr: |
+          sum by (service, namespace) (rate(http_requests_total{status_code!~"5.."}[6h]))
+          /
+          sum by (service, namespace) (rate(http_requests_total[6h]))
+
+      - record: slo:availability:ratio_rate3d
+        expr: |
+          sum by (service, namespace) (rate(http_requests_total{status_code!~"5.."}[3d]))
+          /
+          sum by (service, namespace) (rate(http_requests_total[3d]))
+
+      # 30-day rolling availability (SLO compliance window)
+      - record: slo:availability:ratio_rate30d
+        expr: |
+          sum by (service, namespace) (rate(http_requests_total{status_code!~"5.."}[30d]))
+          /
+          sum by (service, namespace) (rate(http_requests_total[30d]))
+
+  # ---------------------------------------------------------------------------
+  # Latency SLI Recording Rules
+  # ---------------------------------------------------------------------------
+  - name: slo.latency.recording
+    interval: 30s
+    rules:
+      # Latency SLI: ratio of requests faster than 500ms threshold
+      - record: slo:latency:ratio_rate5m
+        expr: |
+          sum by (service, namespace) (
+            rate(http_request_duration_seconds_bucket{le="0.5"}[5m])
+          )
+          /
+          sum by (service, namespace) (
+            rate(http_request_duration_seconds_count[5m])
+          )
+
+      - record: slo:latency:ratio_rate1h
+        expr: |
+          sum by (service, namespace) (
+            rate(http_request_duration_seconds_bucket{le="0.5"}[1h])
+          )
+          /
+          sum by (service, namespace) (
+            rate(http_request_duration_seconds_count[1h])
+          )
+
+      - record: slo:latency:ratio_rate6h
+        expr: |
+          sum by (service, namespace) (
+            rate(http_request_duration_seconds_bucket{le="0.5"}[6h])
+          )
+          /
+          sum by (service, namespace) (
+            rate(http_request_duration_seconds_count[6h])
+          )
+
+      - record: slo:latency:ratio_rate3d
+        expr: |
+          sum by (service, namespace) (
+            rate(http_request_duration_seconds_bucket{le="0.5"}[3d])
+          )
+          /
+          sum by (service, namespace) (
+            rate(http_request_duration_seconds_count[3d])
+          )
+
+      # 30-day rolling latency compliance
+      - record: slo:latency:ratio_rate30d
+        expr: |
+          sum by (service, namespace) (
+            rate(http_request_duration_seconds_bucket{le="0.5"}[30d])
+          )
+          /
+          sum by (service, namespace) (
+            rate(http_request_duration_seconds_count[30d])
+          )
+
+  # ---------------------------------------------------------------------------
+  # Error Budget Calculation Rules
+  # ---------------------------------------------------------------------------
+  - name: slo.error_budget.recording
+    interval: 1m
+    rules:
+      # Error budget remaining for availability SLO (99.9%)
+      # 1.0 = full budget, 0.0 = budget exhausted, negative = over budget
+      - record: slo:error_budget:availability_remaining
+        expr: |
+          1 - (
+            (1 - slo:availability:ratio_rate30d)
+            /
+            (1 - 0.999)
+          )
+        labels:
+          slo_target: "0.999"
+          slo_type: "availability"
+
+      # Error budget remaining for latency SLO (99%)
+      - record: slo:error_budget:latency_remaining
+        expr: |
+          1 - (
+            (1 - slo:latency:ratio_rate30d)
+            /
+            (1 - 0.99)
+          )
+        labels:
+          slo_target: "0.99"
+          slo_type: "latency"
+
+      # Error budget consumption rate (how fast we are burning budget)
+      # > 1.0 means we are consuming budget faster than sustainable
+      - record: slo:error_budget:availability_burn_rate1h
+        expr: |
+          (1 - slo:availability:ratio_rate1h) / (1 - 0.999)
+        labels:
+          slo_target: "0.999"
+          window: "1h"
+
+      - record: slo:error_budget:availability_burn_rate6h
+        expr: |
+          (1 - slo:availability:ratio_rate6h) / (1 - 0.999)
+        labels:
+          slo_target: "0.999"
+          window: "6h"
+
+      - record: slo:error_budget:availability_burn_rate3d
+        expr: |
+          (1 - slo:availability:ratio_rate3d) / (1 - 0.999)
+        labels:
+          slo_target: "0.999"
+          window: "3d"
+
+  # ---------------------------------------------------------------------------
+  # Multi-Window Multi-Burn-Rate Alert Rules (Google SRE Book Ch.5)
+  # ---------------------------------------------------------------------------
+  # The multi-window approach uses two windows for each severity:
+  #   - A short window for detection speed
+  #   - A long window to avoid false positives
+  #
+  # Severity mapping:
+  #   Page (critical):  1h  burn rate > 14.4x  AND 5m  burn rate > 14.4x
+  #   Page (critical):  6h  burn rate > 6x     AND 30m burn rate > 6x
+  #   Ticket (warning): 3d  burn rate > 1x     AND 6h  burn rate > 1x
+  # ---------------------------------------------------------------------------
+  - name: slo.multiwindow_multiburn.alerts
+    rules:
+      # CRITICAL: Fast burn - exhausts 2% of 30-day error budget in 1 hour
+      # Burn rate factor: 14.4x (consumes monthly budget in ~50 hours)
+      - alert: ErrorBudgetBurnRateCritical
+        expr: |
+          (
+            slo:availability:ratio_rate1h < (1 - 14.4 * (1 - 0.999))
+            and
+            slo:availability:ratio_rate5m < (1 - 14.4 * (1 - 0.999))
+          )
+          or
+          (
+            slo:availability:ratio_rate6h < (1 - 6 * (1 - 0.999))
+            and
+            slo:availability:ratio_rate30m < (1 - 6 * (1 - 0.999))
+          )
+        for: 2m
+        labels:
+          severity: critical
+          slo: availability
+          slo_target: "99.9%"
+        annotations:
+          summary: "Critical error budget burn rate for {{ $labels.service }}"
+          description: |
+            Service {{ $labels.service }} in namespace {{ $labels.namespace }} is
+            burning through its error budget at a critical rate.
+            Current availability (1h): {{ $value | humanizePercentage }}
+            SLO target: 99.9%
+            At this rate, the monthly error budget will be exhausted well before
+            the end of the 30-day window.
+          runbook_url: "https://wiki.example.com/runbooks/slo-budget-burn-critical"
+          dashboard_url: "https://grafana.example.com/d/slo-overview"
+
+      # WARNING: Slow burn - exhausts 100% of 30-day error budget over 3 days
+      # Burn rate factor: 1x (exactly consuming at the budget rate)
+      - alert: ErrorBudgetBurnRateWarning
+        expr: |
+          (
+            slo:availability:ratio_rate3d < (1 - 1 * (1 - 0.999))
+            and
+            slo:availability:ratio_rate6h < (1 - 1 * (1 - 0.999))
+          )
+        for: 1h
+        labels:
+          severity: warning
+          slo: availability
+          slo_target: "99.9%"
+        annotations:
+          summary: "Warning: error budget burn rate elevated for {{ $labels.service }}"
+          description: |
+            Service {{ $labels.service }} in namespace {{ $labels.namespace }} has
+            a sustained elevated error rate that is consuming the error budget.
+            Current availability (3d): {{ $value | humanizePercentage }}
+            SLO target: 99.9%
+            If this trend continues, the error budget will be fully consumed.
+          runbook_url: "https://wiki.example.com/runbooks/slo-budget-burn-warning"
+
+      # Latency SLO burn rate alerts
+      - alert: LatencyBudgetBurnRateCritical
+        expr: |
+          (
+            slo:latency:ratio_rate1h < (1 - 14.4 * (1 - 0.99))
+            and
+            slo:latency:ratio_rate5m < (1 - 14.4 * (1 - 0.99))
+          )
+          or
+          (
+            slo:latency:ratio_rate6h < (1 - 6 * (1 - 0.99))
+            and
+            slo:latency:ratio_rate30m < (1 - 6 * (1 - 0.99))
+          )
+        for: 2m
+        labels:
+          severity: critical
+          slo: latency
+          slo_target: "99%"
+        annotations:
+          summary: "Critical latency budget burn rate for {{ $labels.service }}"
+          description: |
+            Service {{ $labels.service }} in namespace {{ $labels.namespace }} is
+            burning through its latency error budget at a critical rate.
+            Current latency compliance (1h): {{ $value | humanizePercentage }}
+            SLO target: 99% of requests < 500ms
+
+      - alert: LatencyBudgetBurnRateWarning
+        expr: |
+          (
+            slo:latency:ratio_rate3d < (1 - 1 * (1 - 0.99))
+            and
+            slo:latency:ratio_rate6h < (1 - 1 * (1 - 0.99))
+          )
+        for: 1h
+        labels:
+          severity: warning
+          slo: latency
+          slo_target: "99%"
+        annotations:
+          summary: "Warning: latency budget burn rate elevated for {{ $labels.service }}"
+          description: |
+            Service {{ $labels.service }} in namespace {{ $labels.namespace }} has
+            sustained elevated latency that is consuming the latency error budget.

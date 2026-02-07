@@ -1,0 +1,232 @@
+# =============================================================================
+# Loki Configuration - SRE Observability Platform
+# =============================================================================
+# Production-grade Loki configuration for log aggregation and querying.
+# Supports both local filesystem storage (development) and S3 (production).
+# =============================================================================
+
+# Authentication is disabled for internal cluster communication.
+# In production, use an auth gateway (e.g., nginx, oauth2-proxy).
+auth_enabled: false
+
+# =============================================================================
+# Server Configuration
+# =============================================================================
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+  log_level: info
+  log_format: json
+
+  # Graceful shutdown timeout
+  graceful_shutdown_timeout: 30s
+
+  # HTTP server settings
+  http_server_read_timeout: 30s
+  http_server_write_timeout: 30s
+  http_server_idle_timeout: 120s
+
+  # gRPC server settings
+  grpc_server_max_recv_msg_size: 104857600  # 100MB
+  grpc_server_max_send_msg_size: 104857600  # 100MB
+
+# =============================================================================
+# Common Configuration
+# =============================================================================
+common:
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    instance_addr: 127.0.0.1
+    kvstore:
+      store: inmemory
+
+# =============================================================================
+# Distributor Configuration
+# =============================================================================
+distributor:
+  ring:
+    kvstore:
+      store: inmemory
+
+# =============================================================================
+# Ingester Configuration
+# =============================================================================
+ingester:
+  lifecycler:
+    address: 127.0.0.1
+    ring:
+      kvstore:
+        store: inmemory
+      replication_factor: 1
+    final_sleep: 0s
+  # Write-Ahead Log (WAL) for crash recovery
+  wal:
+    enabled: true
+    dir: /loki/wal
+    flush_on_shutdown: true
+    replay_memory_ceiling: 1GB
+
+  # Chunk configuration
+  chunk_idle_period: 1h         # Flush chunks after 1h of inactivity
+  max_chunk_age: 2h             # Max age before forced flush
+  chunk_target_size: 1536000    # ~1.5MB target chunk size
+  chunk_retain_period: 30s      # How long to retain chunks in memory after flush
+  max_transfer_retries: 0       # Disable transfers in single-node mode
+
+# =============================================================================
+# Schema Configuration
+# =============================================================================
+schema_config:
+  configs:
+    # v11 schema with TSDB index (recommended for production)
+    - from: "2024-01-01"
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+# =============================================================================
+# Storage Configuration
+# =============================================================================
+storage_config:
+  # Local filesystem storage (development/single-node)
+  filesystem:
+    directory: /loki/chunks
+
+  # TSDB shipper for index storage
+  tsdb_shipper:
+    active_index_directory: /loki/tsdb-index
+    cache_location: /loki/tsdb-cache
+    cache_ttl: 24h
+
+  # ---------------------------------------------------------------------------
+  # S3 Storage (Production - uncomment to enable)
+  # ---------------------------------------------------------------------------
+  # aws:
+  #   s3: s3://us-east-1/loki-logs-bucket
+  #   bucketnames: loki-logs-bucket
+  #   region: us-east-1
+  #   access_key_id: <AWS_ACCESS_KEY_ID>
+  #   secret_access_key: <AWS_SECRET_ACCESS_KEY>
+  #   s3forcepathstyle: true
+  #   insecure: false
+  #   sse_encryption: true
+  #   http_config:
+  #     idle_conn_timeout: 90s
+  #     response_header_timeout: 0s
+  #     insecure_skip_verify: false
+
+# =============================================================================
+# Compactor Configuration
+# =============================================================================
+compactor:
+  working_directory: /loki/compactor
+  compaction_interval: 10m
+  retention_enabled: true
+  retention_delete_delay: 2h
+  retention_delete_worker_count: 150
+  delete_request_store: filesystem
+
+# =============================================================================
+# Limits Configuration
+# =============================================================================
+limits_config:
+  # Ingestion rate limits
+  ingestion_rate_mb: 10           # Max ingestion rate per tenant (MB/s)
+  ingestion_burst_size_mb: 20     # Max burst size per tenant (MB)
+  per_stream_rate_limit: 5MB      # Max rate per stream
+  per_stream_rate_limit_burst: 15MB
+
+  # Query limits
+  max_query_length: 721h          # Max query time range (30 days + 1 hour)
+  max_query_parallelism: 32       # Max parallel queries
+  max_query_series: 5000          # Max series per query
+  max_entries_limit_per_query: 5000
+
+  # Retention
+  retention_period: 744h          # 31 days retention
+
+  # Stream limits
+  max_streams_per_user: 10000
+  max_global_streams_per_user: 10000
+  max_line_size: 256000           # Max log line size (256KB)
+
+  # Cardinality limits
+  max_label_name_length: 1024
+  max_label_value_length: 2048
+  max_label_names_per_series: 30
+
+  # Split queries by interval for better performance
+  split_queries_by_interval: 15m
+
+  # Volume-based querying
+  volume_enabled: true
+
+# =============================================================================
+# Query Range Configuration
+# =============================================================================
+query_range:
+  # Align queries to step intervals
+  align_queries_with_step: true
+
+  # Cache results for repeated queries
+  cache_results: true
+  results_cache:
+    cache:
+      embedded_cache:
+        enabled: true
+        max_size_mb: 100
+        ttl: 1h
+
+  # Parallelism settings
+  parallelise_shardable_queries: true
+  max_retries: 5
+
+# =============================================================================
+# Frontend Configuration
+# =============================================================================
+frontend:
+  max_outstanding_per_tenant: 4096
+  compress_responses: true
+  log_queries_longer_than: 5s
+
+# =============================================================================
+# Ruler Configuration (Log-based alerts)
+# =============================================================================
+ruler:
+  storage:
+    type: local
+    local:
+      directory: /loki/rules
+  rule_path: /loki/rules-temp
+  alertmanager_url: http://alertmanager:9093
+  ring:
+    kvstore:
+      store: inmemory
+  enable_api: true
+  enable_alertmanager_v2: true
+  evaluation_interval: 1m
+  poll_interval: 1m
+  # Remote write for ruler metrics
+  wal:
+    dir: /loki/ruler-wal
+
+# =============================================================================
+# Table Manager Configuration
+# =============================================================================
+table_manager:
+  retention_deletes_enabled: true
+  retention_period: 744h  # 31 days
+
+# =============================================================================
+# Analytics Configuration
+# =============================================================================
+analytics:
+  reporting_enabled: false

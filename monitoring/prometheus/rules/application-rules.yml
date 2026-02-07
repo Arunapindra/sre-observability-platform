@@ -1,0 +1,274 @@
+# =============================================================================
+# Application Recording Rules - SRE Observability Platform
+# =============================================================================
+# Pre-computed recording rules for the RED method (Rate, Errors, Duration)
+# and USE method (Utilization, Saturation, Errors) metrics. These rules
+# reduce query-time computation and enable efficient dashboard rendering.
+# =============================================================================
+
+groups:
+  # ---------------------------------------------------------------------------
+  # Request Rate (R in RED) - Queries Per Second by service
+  # ---------------------------------------------------------------------------
+  - name: application.request_rate
+    interval: 15s
+    rules:
+      # Overall request rate per service
+      - record: app:http_requests:rate5m
+        expr: |
+          sum by (service, namespace) (
+            rate(http_requests_total[5m])
+          )
+
+      # Request rate per service, method, and status code
+      - record: app:http_requests:rate5m_by_method_status
+        expr: |
+          sum by (service, namespace, method, status_code) (
+            rate(http_requests_total[5m])
+          )
+
+      # Request rate per service and HTTP method
+      - record: app:http_requests:rate5m_by_method
+        expr: |
+          sum by (service, namespace, method) (
+            rate(http_requests_total[5m])
+          )
+
+      # Request rate per service and status class (2xx, 3xx, 4xx, 5xx)
+      - record: app:http_requests:rate5m_by_status_class
+        expr: |
+          sum by (service, namespace, status_class) (
+            label_replace(
+              rate(http_requests_total[5m]),
+              "status_class", "${1}xx", "status_code", "([0-9]).."
+            )
+          )
+
+      # Request rate over different windows for trend analysis
+      - record: app:http_requests:rate1m
+        expr: |
+          sum by (service, namespace) (
+            rate(http_requests_total[1m])
+          )
+
+      - record: app:http_requests:rate15m
+        expr: |
+          sum by (service, namespace) (
+            rate(http_requests_total[15m])
+          )
+
+      - record: app:http_requests:rate1h
+        expr: |
+          sum by (service, namespace) (
+            rate(http_requests_total[1h])
+          )
+
+  # ---------------------------------------------------------------------------
+  # Error Rate (E in RED) - Error percentage by service
+  # ---------------------------------------------------------------------------
+  - name: application.error_rate
+    interval: 15s
+    rules:
+      # 5xx error rate per service
+      - record: app:http_errors:rate5m
+        expr: |
+          sum by (service, namespace) (
+            rate(http_requests_total{status_code=~"5.."}[5m])
+          )
+
+      # Error ratio (percentage of requests that are errors)
+      - record: app:http_errors:ratio5m
+        expr: |
+          (
+            sum by (service, namespace) (
+              rate(http_requests_total{status_code=~"5.."}[5m])
+            )
+            /
+            sum by (service, namespace) (
+              rate(http_requests_total[5m])
+            )
+          )
+
+      # Client error rate (4xx)
+      - record: app:http_client_errors:rate5m
+        expr: |
+          sum by (service, namespace) (
+            rate(http_requests_total{status_code=~"4.."}[5m])
+          )
+
+      # Client error ratio
+      - record: app:http_client_errors:ratio5m
+        expr: |
+          (
+            sum by (service, namespace) (
+              rate(http_requests_total{status_code=~"4.."}[5m])
+            )
+            /
+            sum by (service, namespace) (
+              rate(http_requests_total[5m])
+            )
+          )
+
+      # Error rate by specific status code (for detailed breakdown)
+      - record: app:http_errors:rate5m_by_code
+        expr: |
+          sum by (service, namespace, status_code) (
+            rate(http_requests_total{status_code=~"[45].."}[5m])
+          )
+
+  # ---------------------------------------------------------------------------
+  # Duration / Latency (D in RED) - Request duration percentiles
+  # ---------------------------------------------------------------------------
+  - name: application.latency
+    interval: 15s
+    rules:
+      # p50 latency (median)
+      - record: app:http_request_duration:p50_5m
+        expr: |
+          histogram_quantile(0.50,
+            sum by (service, namespace, le) (
+              rate(http_request_duration_seconds_bucket[5m])
+            )
+          )
+
+      # p90 latency
+      - record: app:http_request_duration:p90_5m
+        expr: |
+          histogram_quantile(0.90,
+            sum by (service, namespace, le) (
+              rate(http_request_duration_seconds_bucket[5m])
+            )
+          )
+
+      # p95 latency
+      - record: app:http_request_duration:p95_5m
+        expr: |
+          histogram_quantile(0.95,
+            sum by (service, namespace, le) (
+              rate(http_request_duration_seconds_bucket[5m])
+            )
+          )
+
+      # p99 latency
+      - record: app:http_request_duration:p99_5m
+        expr: |
+          histogram_quantile(0.99,
+            sum by (service, namespace, le) (
+              rate(http_request_duration_seconds_bucket[5m])
+            )
+          )
+
+      # Average request duration
+      - record: app:http_request_duration:avg_5m
+        expr: |
+          (
+            sum by (service, namespace) (
+              rate(http_request_duration_seconds_sum[5m])
+            )
+            /
+            sum by (service, namespace) (
+              rate(http_request_duration_seconds_count[5m])
+            )
+          )
+
+      # Latency percentiles by endpoint for detailed analysis
+      - record: app:http_request_duration:p99_5m_by_endpoint
+        expr: |
+          histogram_quantile(0.99,
+            sum by (service, namespace, handler, le) (
+              rate(http_request_duration_seconds_bucket[5m])
+            )
+          )
+
+  # ---------------------------------------------------------------------------
+  # Saturation Metrics (CPU and Memory utilization)
+  # ---------------------------------------------------------------------------
+  - name: application.saturation
+    interval: 30s
+    rules:
+      # CPU utilization per pod (as a ratio of requested CPU)
+      - record: app:cpu:utilization_ratio
+        expr: |
+          sum by (namespace, pod, service) (
+            rate(container_cpu_usage_seconds_total{container!="POD", container!=""}[5m])
+          )
+          /
+          sum by (namespace, pod, service) (
+            kube_pod_container_resource_requests{resource="cpu", container!="POD", container!=""}
+          )
+
+      # CPU utilization per service (aggregate across pods)
+      - record: app:cpu:utilization_ratio_by_service
+        expr: |
+          sum by (namespace, service) (
+            rate(container_cpu_usage_seconds_total{container!="POD", container!=""}[5m])
+          )
+          /
+          sum by (namespace, service) (
+            kube_pod_container_resource_requests{resource="cpu", container!="POD", container!=""}
+          )
+
+      # Memory utilization per pod (as a ratio of requested memory)
+      - record: app:memory:utilization_ratio
+        expr: |
+          sum by (namespace, pod, service) (
+            container_memory_working_set_bytes{container!="POD", container!=""}
+          )
+          /
+          sum by (namespace, pod, service) (
+            kube_pod_container_resource_requests{resource="memory", container!="POD", container!=""}
+          )
+
+      # Memory utilization per service (aggregate across pods)
+      - record: app:memory:utilization_ratio_by_service
+        expr: |
+          sum by (namespace, service) (
+            container_memory_working_set_bytes{container!="POD", container!=""}
+          )
+          /
+          sum by (namespace, service) (
+            kube_pod_container_resource_requests{resource="memory", container!="POD", container!=""}
+          )
+
+      # Memory usage in bytes per service
+      - record: app:memory:working_set_bytes_by_service
+        expr: |
+          sum by (namespace, service) (
+            container_memory_working_set_bytes{container!="POD", container!=""}
+          )
+
+      # CPU usage in cores per service
+      - record: app:cpu:usage_cores_by_service
+        expr: |
+          sum by (namespace, service) (
+            rate(container_cpu_usage_seconds_total{container!="POD", container!=""}[5m])
+          )
+
+  # ---------------------------------------------------------------------------
+  # gRPC Metrics (for services using gRPC)
+  # ---------------------------------------------------------------------------
+  - name: application.grpc
+    interval: 15s
+    rules:
+      # gRPC request rate per service
+      - record: app:grpc_requests:rate5m
+        expr: |
+          sum by (service, namespace, grpc_method) (
+            rate(grpc_server_handled_total[5m])
+          )
+
+      # gRPC error rate
+      - record: app:grpc_errors:rate5m
+        expr: |
+          sum by (service, namespace) (
+            rate(grpc_server_handled_total{grpc_code!="OK"}[5m])
+          )
+
+      # gRPC latency p99
+      - record: app:grpc_request_duration:p99_5m
+        expr: |
+          histogram_quantile(0.99,
+            sum by (service, namespace, le) (
+              rate(grpc_server_handling_seconds_bucket[5m])
+            )
+          )

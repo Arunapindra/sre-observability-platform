@@ -1,0 +1,292 @@
+# =============================================================================
+# Alertmanager Configuration - SRE Observability Platform
+# =============================================================================
+# Production-grade Alertmanager config with tiered routing:
+#   - Critical alerts -> PagerDuty (immediate page)
+#   - Warning alerts  -> Slack (team channel)
+#   - Info alerts     -> Email (daily digest)
+#
+# Implements inhibition rules to suppress redundant notifications and
+# grouping to reduce alert noise.
+# =============================================================================
+
+global:
+  # Default SMTP settings for email notifications
+  smtp_smarthost: "smtp.gmail.com:587"
+  smtp_from: "alertmanager@example.com"
+  smtp_auth_username: "alertmanager@example.com"
+  smtp_auth_password: "<SMTP_PASSWORD>"
+  smtp_require_tls: true
+
+  # Slack API URL for webhook notifications
+  slack_api_url: "<SLACK_WEBHOOK_URL>"
+
+  # PagerDuty URL
+  pagerduty_url: "https://events.pagerduty.com/v2/enqueue"
+
+  # Default resolve timeout - how long to wait before marking alert as resolved
+  resolve_timeout: 5m
+
+# =============================================================================
+# Notification Templates
+# =============================================================================
+templates:
+  - "/etc/alertmanager/templates/*.tmpl"
+
+# =============================================================================
+# Route Tree
+# =============================================================================
+# The route tree defines how alerts are grouped, throttled, and routed to
+# receivers. Child routes inherit from their parent and can override settings.
+# =============================================================================
+route:
+  # Group alerts by these labels to reduce notification noise
+  group_by: ["alertname", "service", "namespace"]
+
+  # How long to wait before sending a group notification (allows batching)
+  group_wait: 30s
+
+  # How long to wait before sending notifications about new alerts added to
+  # an existing group
+  group_interval: 5m
+
+  # How long to wait before re-sending a notification for an existing alert
+  repeat_interval: 4h
+
+  # Default receiver for all alerts that do not match a child route
+  receiver: "slack-warnings"
+
+  # Child routes - evaluated in order, first match wins
+  routes:
+    # ---------------------------------------------------------------------------
+    # Critical alerts -> PagerDuty (immediate page)
+    # ---------------------------------------------------------------------------
+    - receiver: "pagerduty-critical"
+      matchers:
+        - severity = "critical"
+      group_wait: 10s
+      group_interval: 1m
+      repeat_interval: 1h
+      continue: true  # Also send to Slack for visibility
+
+    # Critical alerts -> also to Slack critical channel
+    - receiver: "slack-critical"
+      matchers:
+        - severity = "critical"
+      group_wait: 10s
+      group_interval: 5m
+      repeat_interval: 2h
+
+    # ---------------------------------------------------------------------------
+    # Warning alerts -> Slack (team channel)
+    # ---------------------------------------------------------------------------
+    - receiver: "slack-warnings"
+      matchers:
+        - severity = "warning"
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 4h
+
+    # ---------------------------------------------------------------------------
+    # SLO/Error Budget alerts -> dedicated SLO channel
+    # ---------------------------------------------------------------------------
+    - receiver: "slack-slo"
+      matchers:
+        - category = "slo"
+      group_wait: 1m
+      group_interval: 10m
+      repeat_interval: 6h
+
+    # ---------------------------------------------------------------------------
+    # Infrastructure alerts -> infrastructure team
+    # ---------------------------------------------------------------------------
+    - receiver: "slack-infrastructure"
+      matchers:
+        - team = "infrastructure"
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 4h
+
+    # ---------------------------------------------------------------------------
+    # Info/Watchdog alerts -> Email (low urgency)
+    # ---------------------------------------------------------------------------
+    - receiver: "email-info"
+      matchers:
+        - severity = "info"
+      group_wait: 10m
+      group_interval: 1h
+      repeat_interval: 24h
+
+    # Watchdog alert - ensures Alertmanager pipeline is working
+    - receiver: "null"
+      matchers:
+        - alertname = "Watchdog"
+
+# =============================================================================
+# Inhibition Rules
+# =============================================================================
+# Suppress duplicate or lower-severity alerts when higher-severity alerts
+# are already firing for the same target.
+# =============================================================================
+inhibit_rules:
+  # If a critical alert is firing for a service, suppress warnings for
+  # the same service and alertname
+  - source_matchers:
+      - severity = "critical"
+    target_matchers:
+      - severity = "warning"
+    equal: ["alertname", "service", "namespace"]
+
+  # If a critical alert is firing for a service, suppress info alerts
+  - source_matchers:
+      - severity = "critical"
+    target_matchers:
+      - severity = "info"
+    equal: ["service", "namespace"]
+
+  # If a warning alert is firing for a service, suppress info alerts
+  - source_matchers:
+      - severity = "warning"
+    target_matchers:
+      - severity = "info"
+    equal: ["service", "namespace"]
+
+  # If a node is not ready, suppress all pod-level alerts on that node
+  - source_matchers:
+      - alertname = "NodeNotReady"
+    target_matchers:
+      - category = "workload"
+    equal: ["node"]
+
+  # If the cluster is down, suppress individual service alerts
+  - source_matchers:
+      - alertname = "KubeAPIServerDown"
+    target_matchers:
+      - category = "workload"
+
+# =============================================================================
+# Receivers
+# =============================================================================
+receivers:
+  # Null receiver - discards alerts (used for watchdog)
+  - name: "null"
+
+  # ---------------------------------------------------------------------------
+  # PagerDuty - Critical alerts that require immediate response
+  # ---------------------------------------------------------------------------
+  - name: "pagerduty-critical"
+    pagerduty_configs:
+      - routing_key: "<PAGERDUTY_ROUTING_KEY>"
+        severity: '{{ if eq .CommonLabels.severity "critical" }}critical{{ else }}warning{{ end }}'
+        description: '{{ .CommonAnnotations.summary }}'
+        details:
+          firing: '{{ template "pagerduty.default.description" . }}'
+          service: '{{ .CommonLabels.service }}'
+          namespace: '{{ .CommonLabels.namespace }}'
+          dashboard: '{{ .CommonAnnotations.dashboard_url }}'
+          runbook: '{{ .CommonAnnotations.runbook_url }}'
+        links:
+          - href: '{{ .CommonAnnotations.runbook_url }}'
+            text: "Runbook"
+          - href: '{{ .CommonAnnotations.dashboard_url }}'
+            text: "Dashboard"
+
+  # ---------------------------------------------------------------------------
+  # Slack - Critical channel
+  # ---------------------------------------------------------------------------
+  - name: "slack-critical"
+    slack_configs:
+      - channel: "#sre-critical-alerts"
+        send_resolved: true
+        username: "AlertManager"
+        icon_emoji: ":rotating_light:"
+        color: '{{ if eq .Status "firing" }}danger{{ else }}good{{ end }}'
+        title: '{{ if eq .Status "firing" }}:fire: CRITICAL{{ else }}:white_check_mark: RESOLVED{{ end }} | {{ .CommonLabels.alertname }}'
+        text: >-
+          *Service:* {{ .CommonLabels.service }}
+          *Namespace:* {{ .CommonLabels.namespace }}
+          *Description:* {{ .CommonAnnotations.description }}
+          *Runbook:* {{ .CommonAnnotations.runbook_url }}
+          *Dashboard:* {{ .CommonAnnotations.dashboard_url }}
+        actions:
+          - type: button
+            text: "Runbook"
+            url: "{{ .CommonAnnotations.runbook_url }}"
+          - type: button
+            text: "Dashboard"
+            url: "{{ .CommonAnnotations.dashboard_url }}"
+          - type: button
+            text: "Silence"
+            url: '{{ template "__alertmanagerURL" . }}/#/silences/new?filter=%7Balertname%3D"{{ .CommonLabels.alertname }}"%7D'
+
+  # ---------------------------------------------------------------------------
+  # Slack - Warnings channel
+  # ---------------------------------------------------------------------------
+  - name: "slack-warnings"
+    slack_configs:
+      - channel: "#sre-warnings"
+        send_resolved: true
+        username: "AlertManager"
+        icon_emoji: ":warning:"
+        color: '{{ if eq .Status "firing" }}warning{{ else }}good{{ end }}'
+        title: '{{ if eq .Status "firing" }}:warning: WARNING{{ else }}:white_check_mark: RESOLVED{{ end }} | {{ .CommonLabels.alertname }}'
+        text: >-
+          *Service:* {{ .CommonLabels.service }}
+          *Namespace:* {{ .CommonLabels.namespace }}
+          *Description:* {{ .CommonAnnotations.description }}
+        actions:
+          - type: button
+            text: "Runbook"
+            url: "{{ .CommonAnnotations.runbook_url }}"
+
+  # ---------------------------------------------------------------------------
+  # Slack - SLO alerts channel
+  # ---------------------------------------------------------------------------
+  - name: "slack-slo"
+    slack_configs:
+      - channel: "#sre-slo-alerts"
+        send_resolved: true
+        username: "SLO Bot"
+        icon_emoji: ":bar_chart:"
+        color: '{{ if eq .Status "firing" }}{{ if eq .CommonLabels.severity "critical" }}danger{{ else }}warning{{ end }}{{ else }}good{{ end }}'
+        title: '{{ if eq .Status "firing" }}:chart_with_downwards_trend: SLO ALERT{{ else }}:chart_with_upwards_trend: RESOLVED{{ end }} | {{ .CommonLabels.alertname }}'
+        text: >-
+          *Service:* {{ .CommonLabels.service }}
+          *SLO Target:* {{ .CommonLabels.slo_target }}
+          *Description:* {{ .CommonAnnotations.description }}
+        actions:
+          - type: button
+            text: "SLO Dashboard"
+            url: "https://grafana.example.com/d/slo-overview"
+
+  # ---------------------------------------------------------------------------
+  # Slack - Infrastructure alerts channel
+  # ---------------------------------------------------------------------------
+  - name: "slack-infrastructure"
+    slack_configs:
+      - channel: "#sre-infrastructure"
+        send_resolved: true
+        username: "Infra Bot"
+        icon_emoji: ":gear:"
+        color: '{{ if eq .Status "firing" }}{{ if eq .CommonLabels.severity "critical" }}danger{{ else }}warning{{ end }}{{ else }}good{{ end }}'
+        title: '{{ .CommonLabels.alertname }} - {{ .Status | toUpper }}'
+        text: >-
+          *Category:* {{ .CommonLabels.category }}
+          *Description:* {{ .CommonAnnotations.description }}
+
+  # ---------------------------------------------------------------------------
+  # Email - Info/digest alerts
+  # ---------------------------------------------------------------------------
+  - name: "email-info"
+    email_configs:
+      - to: "sre-team@example.com"
+        send_resolved: true
+        headers:
+          Subject: '[{{ .Status | toUpper }}] {{ .CommonLabels.alertname }} - {{ .CommonLabels.service }}'
+        html: |
+          <h2>{{ .CommonLabels.alertname }}</h2>
+          <p><b>Service:</b> {{ .CommonLabels.service }}</p>
+          <p><b>Namespace:</b> {{ .CommonLabels.namespace }}</p>
+          <p><b>Severity:</b> {{ .CommonLabels.severity }}</p>
+          <p><b>Description:</b> {{ .CommonAnnotations.description }}</p>
+          <p><a href="{{ .CommonAnnotations.runbook_url }}">Runbook</a></p>

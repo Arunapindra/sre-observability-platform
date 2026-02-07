@@ -1,0 +1,85 @@
+# =============================================================================
+# Grafana Datasource Provisioning - SRE Observability Platform
+# =============================================================================
+# Auto-provisions datasources on Grafana startup. This eliminates manual
+# configuration and ensures consistency across environments.
+# =============================================================================
+
+apiVersion: 1
+
+# List of datasources to delete from the database before provisioning
+deleteDatasources: []
+
+# List of datasources to provision
+datasources:
+  # ---------------------------------------------------------------------------
+  # Prometheus - Primary metrics datasource
+  # ---------------------------------------------------------------------------
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    orgId: 1
+    uid: prometheus
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      # Enable exemplar support for trace correlation
+      exemplarTraceIdDestinations:
+        - name: traceID
+          datasourceUid: tempo
+      # HTTP method for queries (POST is recommended for large queries)
+      httpMethod: POST
+      # Query timeout
+      timeout: 60
+      # Prometheus type and version for optimal query building
+      prometheusType: Prometheus
+      prometheusVersion: "2.47.0"
+      # Incremental querying for better performance
+      incrementalQuerying: true
+      incrementalQueryOverlapWindow: 10m
+      # Cache duration for metric names and label values
+      cacheLevel: High
+    version: 1
+
+  # ---------------------------------------------------------------------------
+  # Loki - Log aggregation datasource
+  # ---------------------------------------------------------------------------
+  - name: Loki
+    type: loki
+    access: proxy
+    orgId: 1
+    uid: loki
+    url: http://loki:3100
+    isDefault: false
+    editable: false
+    jsonData:
+      # Maximum number of log lines to return
+      maxLines: 1000
+      # Timeout for Loki queries
+      timeout: 60
+      # Derived fields for linking logs to traces
+      derivedFields:
+        - datasourceUid: tempo
+          matcherRegex: '"traceID":"(\w+)"'
+          name: TraceID
+          url: "$${__value.raw}"
+    version: 1
+
+  # ---------------------------------------------------------------------------
+  # Alertmanager - Alert management datasource
+  # ---------------------------------------------------------------------------
+  - name: Alertmanager
+    type: alertmanager
+    access: proxy
+    orgId: 1
+    uid: alertmanager
+    url: http://alertmanager:9093
+    isDefault: false
+    editable: false
+    jsonData:
+      # Implementation type
+      implementation: prometheus
+      # Handle Grafana managed alerts
+      handleGrafanaManagedAlerts: false
+    version: 1

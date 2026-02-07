@@ -1,0 +1,238 @@
+# =============================================================================
+# Critical Alerts - SRE Observability Platform
+# =============================================================================
+# These alerts trigger PagerDuty notifications and require immediate response.
+# Each alert includes runbook URLs, clear descriptions, and relevant labels
+# for routing and aggregation.
+# =============================================================================
+
+groups:
+  # ---------------------------------------------------------------------------
+  # Application Critical Alerts
+  # ---------------------------------------------------------------------------
+  - name: critical.application
+    rules:
+      # High error rate: more than 1% of requests failing with 5xx
+      - alert: HighErrorRate
+        expr: |
+          (
+            sum by (service, namespace) (rate(http_requests_total{status_code=~"5.."}[5m]))
+            /
+            sum by (service, namespace) (rate(http_requests_total[5m]))
+          ) > 0.01
+        for: 5m
+        labels:
+          severity: critical
+          team: platform
+          category: availability
+        annotations:
+          summary: "High error rate on {{ $labels.service }}"
+          description: |
+            Service {{ $labels.service }} in namespace {{ $labels.namespace }}
+            has an error rate of {{ $value | humanizePercentage }} over the
+            last 5 minutes, which exceeds the 1% threshold.
+          runbook_url: "https://wiki.example.com/runbooks/high-error-rate"
+          dashboard_url: "https://grafana.example.com/d/service-health?var-service={{ $labels.service }}"
+
+      # High latency: p99 response time exceeds 1 second
+      - alert: HighLatency
+        expr: |
+          histogram_quantile(0.99,
+            sum by (service, namespace, le) (
+              rate(http_request_duration_seconds_bucket[5m])
+            )
+          ) > 1.0
+        for: 5m
+        labels:
+          severity: critical
+          team: platform
+          category: latency
+        annotations:
+          summary: "High p99 latency on {{ $labels.service }}"
+          description: |
+            Service {{ $labels.service }} in namespace {{ $labels.namespace }}
+            has a p99 latency of {{ $value | humanizeDuration }}, which
+            exceeds the 1s threshold.
+          runbook_url: "https://wiki.example.com/runbooks/high-latency"
+          dashboard_url: "https://grafana.example.com/d/service-health?var-service={{ $labels.service }}"
+
+      # Error budget burn rate critical (from SLO rules)
+      - alert: ErrorBudgetExhausted
+        expr: |
+          slo:error_budget:availability_remaining < 0
+        for: 5m
+        labels:
+          severity: critical
+          team: platform
+          category: slo
+        annotations:
+          summary: "Error budget exhausted for {{ $labels.service }}"
+          description: |
+            Service {{ $labels.service }} in namespace {{ $labels.namespace }}
+            has fully exhausted its 30-day error budget. Current remaining:
+            {{ $value | humanizePercentage }}. All non-critical changes
+            should be frozen until the error budget recovers.
+          runbook_url: "https://wiki.example.com/runbooks/error-budget-exhausted"
+
+  # ---------------------------------------------------------------------------
+  # Kubernetes Critical Alerts
+  # ---------------------------------------------------------------------------
+  - name: critical.kubernetes
+    rules:
+      # Pod crash looping: container restarting repeatedly
+      - alert: PodCrashLooping
+        expr: |
+          max_over_time(kube_pod_container_status_waiting_reason{reason="CrashLoopBackOff"}[5m]) >= 1
+        for: 5m
+        labels:
+          severity: critical
+          team: platform
+          category: workload
+        annotations:
+          summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} is crash looping"
+          description: |
+            Container {{ $labels.container }} in pod {{ $labels.pod }} in
+            namespace {{ $labels.namespace }} is in a CrashLoopBackOff state.
+            This indicates the container is repeatedly crashing after startup.
+          runbook_url: "https://wiki.example.com/runbooks/pod-crashlooping"
+
+      # Node not ready: Kubernetes node has gone NotReady
+      - alert: NodeNotReady
+        expr: |
+          kube_node_status_condition{condition="Ready", status="true"} == 0
+        for: 5m
+        labels:
+          severity: critical
+          team: infrastructure
+          category: node
+        annotations:
+          summary: "Kubernetes node {{ $labels.node }} is not ready"
+          description: |
+            Node {{ $labels.node }} has been in a NotReady state for more
+            than 5 minutes. Pods scheduled on this node may be affected.
+            Check kubelet logs and node health.
+          runbook_url: "https://wiki.example.com/runbooks/node-not-ready"
+
+      # Persistent volume almost full
+      - alert: PersistentVolumeAlmostFull
+        expr: |
+          (
+            kubelet_volume_stats_used_bytes
+            /
+            kubelet_volume_stats_capacity_bytes
+          ) > 0.90
+        for: 5m
+        labels:
+          severity: critical
+          team: infrastructure
+          category: storage
+        annotations:
+          summary: "PV {{ $labels.persistentvolumeclaim }} is over 90% full"
+          description: |
+            PersistentVolumeClaim {{ $labels.persistentvolumeclaim }} in
+            namespace {{ $labels.namespace }} is {{ $value | humanizePercentage }}
+            full. Immediate action required to prevent data loss or service
+            disruption.
+          runbook_url: "https://wiki.example.com/runbooks/pv-almost-full"
+
+      # Node disk pressure
+      - alert: NodeDiskPressure
+        expr: |
+          kube_node_status_condition{condition="DiskPressure", status="true"} == 1
+        for: 5m
+        labels:
+          severity: critical
+          team: infrastructure
+          category: node
+        annotations:
+          summary: "Node {{ $labels.node }} has disk pressure"
+          description: |
+            Node {{ $labels.node }} is reporting DiskPressure condition.
+            The node's disk capacity is critically low. Pods may be evicted.
+          runbook_url: "https://wiki.example.com/runbooks/node-disk-pressure"
+
+      # Node memory pressure
+      - alert: NodeMemoryPressure
+        expr: |
+          kube_node_status_condition{condition="MemoryPressure", status="true"} == 1
+        for: 5m
+        labels:
+          severity: critical
+          team: infrastructure
+          category: node
+        annotations:
+          summary: "Node {{ $labels.node }} has memory pressure"
+          description: |
+            Node {{ $labels.node }} is reporting MemoryPressure condition.
+            The node's available memory is critically low. Pods may be evicted.
+          runbook_url: "https://wiki.example.com/runbooks/node-memory-pressure"
+
+      # Kubernetes API server is down
+      - alert: KubeAPIServerDown
+        expr: |
+          absent(up{job="kubernetes-apiservers"} == 1)
+        for: 5m
+        labels:
+          severity: critical
+          team: infrastructure
+          category: control_plane
+        annotations:
+          summary: "Kubernetes API server is unreachable"
+          description: |
+            The Kubernetes API server has been unreachable for more than
+            5 minutes. This is a critical infrastructure failure that will
+            prevent all cluster operations.
+          runbook_url: "https://wiki.example.com/runbooks/kube-apiserver-down"
+
+      # etcd cluster has insufficient members
+      - alert: EtcdInsufficientMembers
+        expr: |
+          count(etcd_server_has_leader) < ((count(etcd_server_has_leader) + 1) / 2)
+        for: 3m
+        labels:
+          severity: critical
+          team: infrastructure
+          category: control_plane
+        annotations:
+          summary: "etcd cluster has insufficient members"
+          description: |
+            The etcd cluster does not have enough healthy members to maintain
+            quorum. This can lead to data loss and cluster unavailability.
+          runbook_url: "https://wiki.example.com/runbooks/etcd-insufficient-members"
+
+  # ---------------------------------------------------------------------------
+  # Prometheus / Monitoring Critical Alerts
+  # ---------------------------------------------------------------------------
+  - name: critical.monitoring
+    rules:
+      # Prometheus target is down
+      - alert: TargetDown
+        expr: |
+          up == 0
+        for: 10m
+        labels:
+          severity: critical
+          team: platform
+          category: monitoring
+        annotations:
+          summary: "Prometheus target {{ $labels.instance }} is down"
+          description: |
+            The Prometheus scrape target {{ $labels.instance }} for job
+            {{ $labels.job }} has been unreachable for 10 minutes.
+          runbook_url: "https://wiki.example.com/runbooks/target-down"
+
+      # Alertmanager cluster has no healthy instances
+      - alert: AlertmanagerClusterDown
+        expr: |
+          count(alertmanager_notifications_total) == 0
+        for: 5m
+        labels:
+          severity: critical
+          team: platform
+          category: monitoring
+        annotations:
+          summary: "Alertmanager cluster is down"
+          description: |
+            No Alertmanager instances are available to process alerts.
+            This means critical alerts will not be delivered.
+          runbook_url: "https://wiki.example.com/runbooks/alertmanager-down"
